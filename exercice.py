@@ -1,7 +1,6 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 
-import mido
 import json
 import csv
 import os
@@ -15,6 +14,7 @@ import mido
 
 
 NOTES_PER_OCTAVE = 12
+DEFAULT_VELOCITY = 80
 
 
 def build_note_dictionaries(note_names, add_octave_no=True):
@@ -35,16 +35,45 @@ def build_note_dictionaries(note_names, add_octave_no=True):
 			name_to_midi[full_note_name] = midi_no if add_octave_no else midi_no % NOTES_PER_OCTAVE
 	return midi_to_name, name_to_midi
 
+def send_note_on(note_name, name_to_midi, midi_outputs):
+	msg = mido.Message("note_on", note=name_to_midi[note_name], velocity=DEFAULT_VELOCITY)
+	for o in midi_outputs:
+		o.send(msg)
+
+def send_note_off(note_name, name_to_midi, midi_outputs):
+	msg = mido.Message("note_on", note=name_to_midi[note_name], velocity=0)
+	for o in midi_outputs:
+		o.send(msg)
+
 def build_note_callbacks(note_name, name_to_midi, midi_outputs):
 	# Construire des callbacks pour bouton appuyé et relâché
+	def action_fn_pressed():
+		send_note_on(note_name, name_to_midi, midi_outputs)
+	def action_fn_released():
+		send_note_off(note_name, name_to_midi, midi_outputs)
 	return action_fn_pressed, action_fn_released
 
 def build_chord_callbacks(chord, chord_notes, name_to_midi, midi_outputs):
 	# Construire des callbacks pour bouton appuyé et relâché
+	def action_fn_pressed():
+		for note in chord_notes[chord]:
+			send_note_on(note, name_to_midi, midi_outputs)
+	def action_fn_released():
+		for note in chord_notes[chord]:
+			send_note_off(note, name_to_midi, midi_outputs)
 	return action_fn_pressed, action_fn_released
 
 def build_custom_action_callbacks(action_name, custom_actions, midi_outputs):
 	# Construire des callbacks pour bouton appuyé et relâché
+	pressed, released = None, None
+	if True in custom_actions[action_name] and custom_actions[action_name][True] is not None:
+		def action_fn_pressed():
+			custom_actions[action_name][True](midi_outputs)
+		pressed = action_fn_pressed
+	if False in custom_actions[action_name] and custom_actions[action_name][False] is not None:
+		def action_fn_released():
+			custom_actions[action_name][False](midi_outputs)
+		released = action_fn_released
 	return pressed, released
 
 def load_input_mappings(filename, name_to_midi, chord_notes, midi_outputs, custom_actions={}):
@@ -56,6 +85,14 @@ def load_input_mappings(filename, name_to_midi, chord_notes, midi_outputs, custo
 	for gamepad_input in gamepad_section:
 		action_name = gamepad_section[gamepad_input]
 		# Construire des callbacks pour l'action appropriée et l'ajouter au mapping.
+		pressed, released = None, None
+		if action_name in name_to_midi:
+			pressed, released = build_note_callbacks(action_name, name_to_midi, midi_outputs)
+		elif action_name in chord_notes:
+			pressed, released = build_chord_callbacks(action_name, chord_notes, name_to_midi, midi_outputs)
+		elif action_name in custom_actions:
+			pressed, released = build_custom_action_callbacks(action_name, custom_actions, midi_outputs)
+		mappings[gamepad_input] = {True: pressed, False: released}
 	return mappings
 
 
@@ -64,9 +101,10 @@ def main():
 	midi_outputs = (mido.open_output("UM-ONE 3"), mido.open_output("UnPortMIDI 4"))
 	midi_input = mido.open_input("UM-ONE 0")
 
-	note_names = {} # Charger du JSON
-	midi_to_name, name_to_midi = build_note_dictionaries([]) # Charger du JSON
-	chords = {} # Charger du JSON
+	notes_data = json.load(open("notes.json", 'r', encoding='windows-1252'))
+	note_names = notes_data['solfeggio_names'] # Charger du JSON
+	midi_to_name, name_to_midi = build_note_dictionaries(note_names) # Charger du JSON
+	chords = notes_data['chords'] # Charger du JSON
 
 	def foo0(midi_outputs):
 		print("henlo")
@@ -76,12 +114,19 @@ def main():
 		"foo": {True: foo0, False: foo1}
 	}
 
-	mappings = load_input_mappings("input.ini", name_to_midi, chords, midi_outputs, custom_actions)
+	mappings = load_input_mappings("input.ini", name_to_midi, chords, midi_outputs)
 
 	while True:
 		for e in gamepad.read():
-			if e.ev_type not in ("Sync") and e.code not in ("ABS_X", "ABS_Y","ABS_RX", "ABS_RY"):
-				print(e.ev_type, e.code, e.state)
+			#if e.ev_type not in ("Sync") and e.code not in ("ABS_X", "ABS_Y","ABS_RX", "ABS_RY"):
+			#	print(e.ev_type, e.code, e.state))
+			btn = e.code.lower()
+			pressed = bool(e.state)
+			if btn in mappings:
+				callbacks = mappings[btn]
+				if pressed in callbacks and callbacks[pressed] is not None:
+					mappings[btn][pressed]()
+				print(btn, pressed)
 
 if __name__ == "__main__":
 	main()
